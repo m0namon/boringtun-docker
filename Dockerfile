@@ -1,31 +1,3 @@
-FROM ubuntu:focal AS builder-curl
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git g++ make binutils autoconf automake autotools-dev libtool \
-    pkg-config libev-dev libjemalloc-dev \
-    ca-certificates mime-support
-RUN git clone --depth 1 -b OpenSSL_1_1_1g-quic-draft-32 https://github.com/tatsuhiro-t/openssl && \
-    cd openssl && ./config enable-tls1_3 --prefix=/build/openssl && make -j$(nproc) && make install_sw && cd .. && rm -rf openssl && \
-    git clone --depth 1 https://github.com/ngtcp2/nghttp3 && \
-    cd nghttp3 && autoreconf -i && \
-    ./configure --prefix=/build/nghttp3 --enable-lib-only && \
-    make -j$(nproc) && make install-strip && cd .. && rm -rf nghttp3
-RUN git clone --depth 1 https://github.com/ngtcp2/ngtcp2 && \
-    cd ngtcp2 && autoreconf -i && \
-    ./configure \
-    PKG_CONFIG_PATH=/build/openssl/lib/pkgconfig:/build/nghttp3/lib/pkgconfig \
-    LDFLAGS="-Wl,-rpath,/build/openssl/lib" \
-    --prefix=/build/ngtcp2 && \
-    make -j$(nproc) && \
-    make install && \
-    strip examples/client examples/server && \
-    cp examples/client examples/server /usr/local/bin && \
-    cd .. && rm -rf ngtcp2
-RUN git clone https://github.com/curl/curl && \
-    cd curl && \
-    autoreconf -fi && \
-    LDFLAGS="-Wl,-rpath,/build/openssl/lib" ./configure --with-ssl=/build/openssl --with-nghttp3=/build/nghttp3 --with-ngtcp2=/build/ngtcp2 && \
-    make && make DESTDIR="/ubuntu/" install
-
 FROM rust:1.40-slim-buster AS builder-boringtun
 
 WORKDIR /src
@@ -34,13 +6,72 @@ COPY boringtun .
 RUN ls
 RUN cargo build --release \
     && strip ./target/release/boringtun
-FROM ubuntu:focal
+
+FROM ubuntu:xenial
+
 RUN apt-get update && apt-get install -y curl
-COPY --from=builder-curl /ubuntu/usr/local /usr/local/
-COPY --from=builder-curl /build/ /build/
 RUN ldconfig
 WORKDIR /app
 COPY --from=builder-boringtun /src/target/release/boringtun /app
 ENV WG_LOG_LEVEL=info \
     WG_THREADS=4
 RUN apt-get update && apt-get install -y --no-install-suggests wireguard-tools iproute2 iptables tcpdump
+
+RUN \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
+    && apt-get update -y
+
+RUN \
+    apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    lsb-base \
+    lsb-release \
+    sudo
+
+RUN \
+    cd / \
+    && git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+
+RUN \
+    cd / \
+    && git clone https://github.com/chromedp/docker-headless-shell.git
+
+RUN \
+    echo Etc/UTC > /etc/timezone
+
+RUN \
+    echo tzdata tzdata/Areas select Etc | debconf-set-selections
+
+RUN \
+    echo tzdata tzdata/Zones/Etc UTC | debconf-set-selections
+
+RUN \
+    echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections
+
+ENV PATH=/depot_tools:$PATH
+
+# needed for install-build-deps.sh
+RUN \
+    apt-get install -y python
+
+RUN \
+    curl -s https://chromium.googlesource.com/chromium/src/+/master/build/install-build-deps.sh?format=TEXT | base64 -d \
+    | perl -pe 's/apt-get install \$\{do_quietly-}/DEBIAN_FRONTEND=noninteractive apt-get install -y/' \
+    | bash -e -s - \
+    --no-prompt \
+    --no-chromeos-fonts \
+    --no-arm \
+    --no-syms \
+    --no-nacl \
+    --no-backwards-compatible
+
+# needed to build mojo
+RUN \
+    apt-get install -y default-jdk
+
+RUN \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+WORKDIR /app
